@@ -1,0 +1,65 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 210 40% 98%;
+    --foreground: 215 28% 17%;
+    --card: 0 0% 100%;
+    --card-foreground: 215 28% 17%;
+    --primary: 199 89% 30%; /* deep clinical teal-blue */
+    --primary-foreground: 0 0% 100%;
+    --secondary: 199 30% 94%;
+    --secondary-foreground: 199 89% 20%;
+    --muted: 210 20% 95%;
+    --muted-foreground: 215 16% 45%;
+    --accent: 173 58% 39%; /* teal accent */
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 214 20% 88%;
+    --input: 214 20% 88%;
+    --ring: 199 89% 30%;
+    --radius: 0.5rem;
+
+    --risk-critical: 0 72% 51%;
+    --risk-high: 25 95% 53%;
+    --risk-medium: 45 93% 47%;
+    --risk-low: 142 71% 35%;
+    --risk-overstock: 262 52% 52%;
+  }
+
+  :root[data-theme="dark"] {
+    --background: 222 47% 8%;
+    --foreground: 210 20% 92%;
+    --card: 222 40% 11%;
+    --card-foreground: 210 20% 92%;
+    --primary: 199 89% 55%;
+    --primary-foreground: 222 47% 8%;
+    --secondary: 217 33% 18%;
+    --secondary-foreground: 210 20% 92%;
+    --muted: 217 33% 16%;
+    --muted-foreground: 215 16% 65%;
+    --accent: 173 58% 45%;
+    --accent-foreground: 222 47% 8%;
+    --destructive: 0 63% 55%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 217 33% 22%;
+    --input: 217 33% 22%;
+    --ring: 199 89% 55%;
+
+    --risk-critical: 0 72% 60%;
+    --risk-high: 25 95% 60%;
+    --risk-medium: 45 93% 55%;
+    --risk-low: 142 60% 45%;
+    --risk-overstock: 262 60% 65%;
+  }
+
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+}

@@ -1,0 +1,403 @@
+// DSEWS database schema.
+//
+// NOTE ON ENUMS: SQLite has no native enum type, so fields that are
+// conceptually enums (role, riskLevel, status, category, etc.) are declared
+// as String here and constrained/validated by Zod schemas + shared TS union
+// types (packages/shared/src/types.ts) in the application layer. This keeps
+// the schema portable if you switch `provider` to "postgresql" later, where
+// you may optionally convert them to real Prisma enums.
+//
+// TO SWITCH TO POSTGRES/SUPABASE FOR PRODUCTION:
+//   1. Change `provider = "sqlite"` to `provider = "postgresql"` below.
+//   2. Set DATABASE_URL in .env to your Supabase/Neon connection string.
+//   3. Run `npx prisma migrate dev --name init` again.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Organization & Access
+// ---------------------------------------------------------------------------
+
+model Organization {
+  id                 String   @id @default(cuid())
+  name               String
+  orgType            String // e.g. HOSPITAL, PHARMACY_CHAIN, DISTRIBUTOR, CENTRAL_MEDICAL_STORE
+  primaryContactName String?
+  primaryContactEmail String?
+  primaryContactPhone String?
+  currency           String   @default("USD")
+  timezone           String   @default("UTC")
+  isDemo             Boolean  @default(true)
+  /// false until the onboarding wizard (locations + inventory policy) has been completed.
+  orgSetupComplete   Boolean  @default(true)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  settings           OrgSettings?
+  locations          Location[]
+  users              User[]
+  drugs              Drug[]
+  suppliers          Supplier[]
+  inventoryItems     InventoryItem[]
+  batches            Batch[]
+  consumptionHistory ConsumptionHistory[]
+  purchaseRequests   PurchaseRequest[]
+  stockMovements     StockMovement[]
+  stockTransfers     StockTransfer[]
+  alerts             Alert[]
+  forecastResults    ForecastResult[]
+  auditLogs          AuditLog[]
+}
+
+/// Configurable policy knobs referenced by the risk & procurement engine (packages/shared).
+model OrgSettings {
+  id                          String   @id @default(cuid())
+  orgId                       String   @unique
+  serviceLevelZ               Float    @default(1.65)
+  criticalDaysThreshold       Float    @default(4)
+  reviewPeriodDays            Float    @default(14)
+  overstockCoverageMultiplier Float    @default(3)
+  defaultLeadTimeDays         Float    @default(7)
+  minOrderQuantityDefault     Float    @default(10)
+  abcACutoffPct               Float    @default(70)
+  abcBCutoffPct               Float    @default(90)
+  fsnFastMovingDays           Float    @default(30)
+  fsnNonMovingDays            Float    @default(90)
+  expiryWindowsDays           String   @default("[30,60,90]") // JSON-encoded number[]
+  updatedAt                   DateTime @updatedAt
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+}
+
+model Location {
+  id        String   @id @default(cuid())
+  orgId     String
+  name          String
+  type          String // CENTRAL_WAREHOUSE | MAIN_PHARMACY | IP_PHARMACY | OP_PHARMACY | EMERGENCY_PHARMACY | OT_STORE | SATELLITE_PHARMACY
+  address       String?
+  contactPerson String?
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  organization       Organization         @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  users              User[]
+  inventoryItems     InventoryItem[]
+  batches            Batch[]
+  consumptionHistory ConsumptionHistory[]
+  purchaseRequests   PurchaseRequest[]
+  stockMovements     StockMovement[]
+  stockTransfersFrom StockTransfer[]      @relation("TransferFrom")
+  stockTransfersTo   StockTransfer[]      @relation("TransferTo")
+  alerts             Alert[]
+  forecastResults    ForecastResult[]
+
+  @@index([orgId])
+}
+
+model User {
+  id           String    @id @default(cuid())
+  orgId        String
+  locationId   String?
+  email        String    @unique
+  passwordHash String
+  name         String
+  phone        String?
+  role         String // UserRole union — see packages/shared/src/types.ts
+  isActive     Boolean   @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  organization     Organization       @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  location         Location?          @relation(fields: [locationId], references: [id])
+  purchaseRequestsCreated  PurchaseRequest[] @relation("RequestedBy")
+  purchaseRequestsApproved PurchaseRequest[] @relation("ApprovedBy")
+  stockTransfersRequested  StockTransfer[]   @relation("TransferRequestedBy")
+  auditLogs        AuditLog[]
+
+  @@index([orgId])
+}
+
+// ---------------------------------------------------------------------------
+// Master data
+// ---------------------------------------------------------------------------
+
+model Supplier {
+  id                 String   @id @default(cuid())
+  orgId              String
+  name               String
+  contactName        String?
+  contactEmail       String?
+  contactPhone       String?
+  avgLeadTimeDays    Float    @default(7)
+  onTimeDeliveryPct  Float    @default(90)
+  reliabilityScore   Float    @default(80) // 0-100, illustrative demo score
+  notes              String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  organization     Organization      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  inventoryItems   InventoryItem[]
+  purchaseRequests PurchaseRequest[]
+
+  @@index([orgId])
+}
+
+model Drug {
+  id                  String   @id @default(cuid())
+  orgId               String
+  drugCode            String
+  genericName         String
+  brandName           String?
+  strength            String
+  dosageForm          String
+  therapeuticCategory String
+  manufacturer        String
+  unit                String // e.g. TABLET, VIAL, BOTTLE, AMPOULE
+  unitCost             Float
+  criticality         String   @default("ESSENTIAL") // VITAL | ESSENTIAL | DESIRABLE (also serves as VED category)
+  abcCategory          String? // A | B | C — recalculated periodically, cached here
+  fsnCategory          String? // F | S | N — recalculated periodically, cached here
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  updatedBy           String?
+
+  organization       Organization         @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  inventoryItems     InventoryItem[]
+  batches            Batch[]
+  consumptionHistory ConsumptionHistory[]
+  purchaseRequests   PurchaseRequest[]
+  stockMovements     StockMovement[]
+  stockTransfers     StockTransfer[]
+  alerts             Alert[]
+  forecastResults    ForecastResult[]
+
+  @@unique([orgId, drugCode])
+  @@index([orgId])
+}
+
+// ---------------------------------------------------------------------------
+// Inventory position, batches, consumption
+// ---------------------------------------------------------------------------
+
+/// The live stock position of one drug at one location.
+model InventoryItem {
+  id               String    @id @default(cuid())
+  orgId            String
+  drugId           String
+  locationId       String
+  supplierId       String?
+  currentStock     Float     @default(0)
+  minStockLevel    Float     @default(0)
+  reorderLevel     Float     @default(0)
+  maxStockLevel    Float     @default(0)
+  leadTimeDays     Float     @default(7)
+  safetyStockOverride Float?
+  lastPurchaseDate DateTime?
+  lastPurchaseQty  Float?
+  updatedAt        DateTime  @updatedAt
+  updatedBy        String?
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  drug         Drug         @relation(fields: [drugId], references: [id], onDelete: Cascade)
+  location     Location     @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  supplier     Supplier?    @relation(fields: [supplierId], references: [id])
+
+  @@unique([drugId, locationId])
+  @@index([orgId])
+  @@index([locationId])
+}
+
+model Batch {
+  id           String   @id @default(cuid())
+  orgId        String
+  drugId       String
+  locationId   String
+  batchNumber  String
+  expiryDate   DateTime
+  quantity     Float
+  unitCost     Float
+  receivedDate DateTime @default(now())
+  createdAt    DateTime @default(now())
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  drug         Drug         @relation(fields: [drugId], references: [id], onDelete: Cascade)
+  location     Location     @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@index([orgId])
+  @@index([drugId, locationId])
+  @@index([expiryDate])
+}
+
+model ConsumptionHistory {
+  id              String   @id @default(cuid())
+  orgId           String
+  drugId          String
+  locationId      String
+  date            DateTime
+  quantityConsumed Float
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  drug         Drug         @relation(fields: [drugId], references: [id], onDelete: Cascade)
+  location     Location     @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@unique([drugId, locationId, date])
+  @@index([orgId])
+  @@index([drugId, locationId, date])
+}
+
+// ---------------------------------------------------------------------------
+// Procurement & stock movement
+// ---------------------------------------------------------------------------
+
+model PurchaseRequest {
+  id                  String    @id @default(cuid())
+  orgId               String
+  drugId              String
+  locationId          String
+  supplierId          String?
+  recommendedQty      Float
+  requestedQty        Float
+  unitCost            Float
+  estimatedCost       Float
+  status              String    @default("PENDING_APPROVAL") // PurchaseRequestStatus union
+  priority            String    @default("MEDIUM") // RiskLevel union
+  expectedDeliveryDate DateTime?
+  requestedById       String
+  approvedById        String?
+  notes               String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  drug         Drug         @relation(fields: [drugId], references: [id], onDelete: Cascade)
+  location     Location     @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  supplier     Supplier?    @relation(fields: [supplierId], references: [id])
+  requestedBy  User         @relation("RequestedBy", fields: [requestedById], references: [id])
+  approvedBy   User?        @relation("ApprovedBy", fields: [approvedById], references: [id])
+
+  @@index([orgId])
+  @@index([status])
+}
+
+model StockMovement {
+  id            String   @id @default(cuid())
+  orgId         String
+  drugId        String
+  locationId    String
+  type          String // StockMovementType union
+  quantity      Float
+  referenceType String? // e.g. "PurchaseRequest", "Transfer"
+  referenceId   String?
+  performedBy   String?
+  notes         String?
+  occurredAt    DateTime @default(now())
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  drug         Drug         @relation(fields: [drugId], references: [id], onDelete: Cascade)
+  location     Location     @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@index([orgId])
+  @@index([drugId, locationId])
+}
+
+/// Internal stock-transfer request (Phase 11H): recommended when one location has excess
+/// stock and another has a shortage risk. Nothing is moved until a user records completion.
+model StockTransfer {
+  id             String    @id @default(cuid())
+  orgId          String
+  drugId         String
+  fromLocationId String
+  toLocationId   String
+  quantity       Float
+  status         String    @default("REQUESTED") // REQUESTED | COMPLETED | CANCELLED
+  reason         String?
+  requestedById  String
+  createdAt      DateTime  @default(now())
+  completedAt    DateTime?
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  drug         Drug         @relation(fields: [drugId], references: [id], onDelete: Cascade)
+  fromLocation Location     @relation("TransferFrom", fields: [fromLocationId], references: [id], onDelete: Cascade)
+  toLocation   Location     @relation("TransferTo", fields: [toLocationId], references: [id], onDelete: Cascade)
+  requestedBy  User         @relation("TransferRequestedBy", fields: [requestedById], references: [id])
+
+  @@index([orgId])
+  @@index([status])
+}
+
+// ---------------------------------------------------------------------------
+// Alerts, forecasting cache, audit
+// ---------------------------------------------------------------------------
+
+model Alert {
+  id                    String    @id @default(cuid())
+  orgId                 String
+  drugId                String
+  locationId            String
+  type                  String // AlertType union
+  riskLevel             String?
+  message               String
+  reasonSummary         String
+  riskScore             Float?
+  daysRemaining         Float?
+  projectedStockoutDate DateTime?
+  recommendedAction     String?
+  isRead                Boolean   @default(false)
+  isResolved            Boolean   @default(false)
+  createdAt             DateTime  @default(now())
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  drug         Drug         @relation(fields: [drugId], references: [id], onDelete: Cascade)
+  location     Location     @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@index([orgId])
+  @@index([type])
+  @@index([isResolved])
+}
+
+model ForecastResult {
+  id                    String   @id @default(cuid())
+  orgId                 String
+  drugId                String
+  locationId            String
+  method                String // ForecastMethod union
+  forecastedDailyDemand Float
+  avg7Day               Float
+  avg30Day              Float
+  avg90Day              Float
+  trendPctChange        Float
+  generatedAt           DateTime @default(now())
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  drug         Drug         @relation(fields: [drugId], references: [id], onDelete: Cascade)
+  location     Location     @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@index([orgId])
+  @@index([drugId, locationId])
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  orgId       String
+  userId      String?
+  action      String
+  entityType  String
+  entityId    String
+  changesJson String? // JSON-encoded diff
+  createdAt   DateTime @default(now())
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user         User?        @relation(fields: [userId], references: [id])
+
+  @@index([orgId])
+  @@index([entityType, entityId])
+}
