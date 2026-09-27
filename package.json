@@ -15,7 +15,8 @@
     "build": "npm run build --workspace=packages/shared && npm run build --workspace=server && npm run build --workspace=web",
     "db:setup": "npm run build --workspace=packages/shared && npm run db:generate --workspace=server && npm run db:migrate --workspace=server && npm run db:seed --workspace=server",
     "db:reset": "npm run db:reset --workspace=server",
-    "test": "npm run test --workspace=packages/shared && npm run test --workspace=server"
+    "test": "npm run test --workspace=packages/shared && npm run test --workspace=server",
+    "render-build": "npm run build --workspace=packages/shared && npx prisma generate --schema=server/prisma/schema.prisma && npm run build --workspace=server"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"
