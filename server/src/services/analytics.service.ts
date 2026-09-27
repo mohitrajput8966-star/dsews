@@ -87,10 +87,28 @@ async function computeFsnByDrug(orgId: string): Promise<Map<string, FSNCategory>
 }
 
 export async function getDashboard(orgId: string, filters: DashboardFilters) {
-  const policy = await getOrgPolicy(orgId);
-  const { items, summary } = await assessOrganizationInventory(orgId, { locationId: filters.locationId });
-  const drugMeta = await drugMetaMap(orgId);
-  const abcByDrug = await computeAbcByDrug(orgId);
+  const consumptionTrendSince = new Date();
+  consumptionTrendSince.setDate(consumptionTrendSince.getDate() - 30);
+
+  // All of these are independent of each other — run them concurrently instead
+  // of one-at-a-time, since each round trip carries real network latency
+  // against a hosted database (this endpoint alone used to take 12-15
+  // sequential queries end-to-end).
+  const [policy, { items, summary }, drugMeta, abcByDrug, batches, openProcurementRequests, consumptionRows, supplierItemIds] =
+    await Promise.all([
+      getOrgPolicy(orgId),
+      assessOrganizationInventory(orgId, { locationId: filters.locationId }),
+      drugMetaMap(orgId),
+      computeAbcByDrug(orgId),
+      prisma.batch.findMany({ where: { orgId, ...(filters.locationId ? { locationId: filters.locationId } : {}) } }),
+      prisma.purchaseRequest.count({ where: { orgId, status: { notIn: ["RECEIVED", "CANCELLED", "REJECTED"] } } }),
+      prisma.consumptionHistory.findMany({
+        where: { orgId, date: { gte: consumptionTrendSince }, ...(filters.locationId ? { locationId: filters.locationId } : {}) },
+      }),
+      filters.supplierId
+        ? prisma.inventoryItem.findMany({ where: { orgId, supplierId: filters.supplierId }, select: { id: true } })
+        : Promise.resolve(null),
+    ]);
   const vedByDrug = new Map(Array.from(drugMeta.values()).map((d) => [d.id, d.criticality]));
 
   let filteredItems = items;
@@ -98,9 +116,8 @@ export async function getDashboard(orgId: string, filters: DashboardFilters) {
   if (filters.riskLevel) filteredItems = filteredItems.filter((i) => i.assessment.riskLevel === filters.riskLevel);
   if (filters.abcCategory) filteredItems = filteredItems.filter((i) => abcByDrug.get(i.drugId) === filters.abcCategory);
   if (filters.vedCategory) filteredItems = filteredItems.filter((i) => i.criticality === filters.vedCategory);
-  if (filters.supplierId) {
-    const items2 = await prisma.inventoryItem.findMany({ where: { orgId, supplierId: filters.supplierId }, select: { id: true } });
-    const allowed = new Set(items2.map((i) => i.id));
+  if (supplierItemIds) {
+    const allowed = new Set(supplierItemIds.map((i) => i.id));
     filteredItems = filteredItems.filter((i) => allowed.has(i.inventoryItemId));
   }
 
@@ -114,18 +131,11 @@ export async function getDashboard(orgId: string, filters: DashboardFilters) {
     return days <= 30;
   }).length;
 
-  const batches = await prisma.batch.findMany({
-    where: { orgId, ...(filters.locationId ? { locationId: filters.locationId } : {}) },
-  });
   const today = new Date();
   const expired = batches.filter((b) => daysUntilExpiry(b.expiryDate.toISOString().slice(0, 10), today) < 0);
   const nearExpiry = batches.filter((b) => {
     const d = daysUntilExpiry(b.expiryDate.toISOString().slice(0, 10), today);
     return d >= 0 && d <= Math.max(...policy.expiryWindowsDays);
-  });
-
-  const openProcurementRequests = await prisma.purchaseRequest.count({
-    where: { orgId, status: { notIn: ["RECEIVED", "CANCELLED", "REJECTED"] } },
   });
 
   // --- Charts ---
@@ -156,11 +166,6 @@ export async function getDashboard(orgId: string, filters: DashboardFilters) {
     .map(([category, value]) => ({ category, value: Math.round(value * 100) / 100 }))
     .sort((a, b) => b.value - a.value);
 
-  const consumptionTrendSince = new Date();
-  consumptionTrendSince.setDate(consumptionTrendSince.getDate() - 30);
-  const consumptionRows = await prisma.consumptionHistory.findMany({
-    where: { orgId, date: { gte: consumptionTrendSince }, ...(filters.locationId ? { locationId: filters.locationId } : {}) },
-  });
   const trendMap = new Map<string, number>();
   for (const row of consumptionRows) {
     const key = row.date.toISOString().slice(0, 10);
