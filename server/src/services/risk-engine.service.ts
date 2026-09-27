@@ -202,7 +202,13 @@ export interface RiskSummary {
   overstocked: number;
 }
 
-/** Runs the assessment for every inventory position in the org (optionally filtered by location). */
+/** Runs the assessment for every inventory position in the org (optionally filtered by location).
+ *
+ * PERFORMANCE NOTE: this used to issue 2 extra queries per inventory item inside the loop
+ * (consumption history + historical alert count) — fine at zero network latency against a
+ * local SQLite file, but ~330 extra round trips is genuinely slow against a networked
+ * Postgres database. Both are now fetched in ONE query each for the whole org up front and
+ * grouped in memory, so the loop below does no I/O at all. */
 export async function assessOrganizationInventory(
   orgId: string,
   filters: { locationId?: string; riskLevels?: RiskLevel[] } = {}
@@ -214,10 +220,43 @@ export async function assessOrganizationInventory(
     include: { drug: true, location: true, supplier: true },
   });
 
+  const consumptionSince = new Date();
+  consumptionSince.setDate(consumptionSince.getDate() - ADC_WINDOW_DAYS);
+  const alertsSince = new Date();
+  alertsSince.setDate(alertsSince.getDate() - STOCKOUT_LOOKBACK_DAYS);
+
+  const [consumptionRows, alertGroups] = await Promise.all([
+    prisma.consumptionHistory.findMany({
+      where: { orgId, date: { gte: consumptionSince } },
+      orderBy: { date: "asc" },
+      select: { drugId: true, locationId: true, date: true, quantityConsumed: true },
+    }),
+    prisma.alert.groupBy({
+      by: ["drugId", "locationId"],
+      where: { orgId, type: "CRITICAL", createdAt: { gte: alertsSince } },
+      _count: { _all: true },
+    }),
+  ]);
+
+  const consumptionByKey = new Map<string, ConsumptionRecord[]>();
+  for (const row of consumptionRows) {
+    const key = `${row.drugId}:${row.locationId}`;
+    const record = { date: row.date.toISOString().slice(0, 10), quantity: row.quantityConsumed };
+    const existing = consumptionByKey.get(key);
+    if (existing) existing.push(record);
+    else consumptionByKey.set(key, [record]);
+  }
+
+  const alertCountByKey = new Map<string, number>();
+  for (const g of alertGroups) {
+    alertCountByKey.set(`${g.drugId}:${g.locationId}`, g._count._all);
+  }
+
   const results: InventoryRiskResult[] = [];
   for (const item of inventoryItems) {
-    const history = await getRecentConsumption(item.drugId, item.locationId, ADC_WINDOW_DAYS);
-    const historicalStockoutCount90d = await getHistoricalStockoutCount(orgId, item.drugId, item.locationId);
+    const key = `${item.drugId}:${item.locationId}`;
+    const history = consumptionByKey.get(key) ?? [];
+    const historicalStockoutCount90d = alertCountByKey.get(key) ?? 0;
 
     const assessment = calculateRiskAssessment({
       currentStock: item.currentStock,

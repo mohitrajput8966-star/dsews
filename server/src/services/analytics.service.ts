@@ -28,16 +28,18 @@ async function computeAbcByDrug(orgId: string): Promise<Map<string, ABCCategory>
   const since = new Date();
   since.setDate(since.getDate() - ADC_WINDOW_DAYS);
 
-  const values: { id: string; annualValue: number }[] = [];
-  for (const drug of drugs) {
-    const consumed = await prisma.consumptionHistory.aggregate({
-      where: { drugId: drug.id, date: { gte: since } },
-      _sum: { quantityConsumed: true },
-    });
-    const totalQty = consumed._sum.quantityConsumed ?? 0;
-    const adc = totalQty / ADC_WINDOW_DAYS;
-    values.push({ id: drug.id, annualValue: adc * 365 * drug.unitCost });
-  }
+  // One grouped query for all drugs instead of one aggregate query per drug.
+  const totals = await prisma.consumptionHistory.groupBy({
+    by: ["drugId"],
+    where: { orgId, date: { gte: since } },
+    _sum: { quantityConsumed: true },
+  });
+  const totalByDrug = new Map(totals.map((t) => [t.drugId, t._sum.quantityConsumed ?? 0]));
+
+  const values = drugs.map((drug) => {
+    const adc = (totalByDrug.get(drug.id) ?? 0) / ADC_WINDOW_DAYS;
+    return { id: drug.id, annualValue: adc * 365 * drug.unitCost };
+  });
   const classified = classifyABC(values, policy.abcThresholds.aCutoffPct, policy.abcThresholds.bCutoffPct);
   return new Map(Object.entries(classified) as [string, ABCCategory][]);
 }
@@ -49,18 +51,33 @@ async function computeFsnByDrug(orgId: string): Promise<Map<string, FSNCategory>
   const since = new Date();
   since.setDate(since.getDate() - policy.fsnNonMovingDays);
 
+  // One query for the whole org instead of one findMany per drug.
+  const records = await prisma.consumptionHistory.findMany({
+    where: { orgId, date: { gte: since }, quantityConsumed: { gt: 0 } },
+    orderBy: { date: "desc" },
+    select: { drugId: true, date: true },
+  });
+  const byDrug = new Map<string, { lastConsumptionDate: string | null; days: Set<string> }>();
+  for (const r of records) {
+    const dateStr = r.date.toISOString().slice(0, 10);
+    const entry = byDrug.get(r.drugId) ?? { lastConsumptionDate: dateStr, days: new Set<string>() };
+    entry.days.add(dateStr);
+    if (!entry.lastConsumptionDate || dateStr > entry.lastConsumptionDate) entry.lastConsumptionDate = dateStr;
+    byDrug.set(r.drugId, entry);
+  }
+
   const result = new Map<string, FSNCategory>();
   for (const drug of drugs) {
-    const records = await prisma.consumptionHistory.findMany({
-      where: { drugId: drug.id, date: { gte: since }, quantityConsumed: { gt: 0 } },
-      orderBy: { date: "desc" },
-    });
-    const lastConsumptionDate = records[0]?.date.toISOString().slice(0, 10) ?? null;
-    const distinctDays = new Set(records.map((r) => r.date.toISOString().slice(0, 10))).size;
+    const entry = byDrug.get(drug.id);
     result.set(
       drug.id,
       classifyFSN(
-        { id: drug.id, lastConsumptionDate, consumptionDaysCount: distinctDays, analysisPeriodDays: policy.fsnNonMovingDays },
+        {
+          id: drug.id,
+          lastConsumptionDate: entry?.lastConsumptionDate ?? null,
+          consumptionDaysCount: entry?.days.size ?? 0,
+          analysisPeriodDays: policy.fsnNonMovingDays,
+        },
         policy.fsnFastMovingDays,
         policy.fsnNonMovingDays
       )
